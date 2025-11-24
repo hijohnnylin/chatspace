@@ -501,7 +501,7 @@ requires-dist = [
     { name = "datasets", specifier = ">=4.1.1" },
     { name = "flash-attn", marker = "extra == 'flash-attn'", specifier = ">=2.5.1" },
     { name = "huggingface-hub", extras = ["hf-transfer"], specifier = ">=0.35.1" },
-    { name = "ml-dtypes", specifier = ">=0.5.3" },
+    { name = "ml-dtypes", specifier = ">=0.3.5" },
     { name = "openai", specifier = ">=1.109.1" },
     { name = "peft", specifier = ">=0.17.1" },
     { name = "plotly", specifier = ">=5.24.0" },
