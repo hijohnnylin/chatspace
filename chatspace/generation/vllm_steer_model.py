@@ -48,6 +48,7 @@ import torch
 from vllm import SamplingParams
 
 from chatspace.vllm_steering import runtime as steering_runtime
+
 # SteerableModel ABC removed - only vLLM implementation exists
 
 
@@ -127,12 +128,16 @@ class ProjectionCapSpec:
     def __post_init__(self):
         """Validate projection cap spec."""
         if self.min is None and self.max is None:
-            raise ValueError("ProjectionCapSpec requires at least one of min or max to be set")
+            raise ValueError(
+                "ProjectionCapSpec requires at least one of min or max to be set"
+            )
         if not torch.isfinite(self.vector).all():
             raise ValueError("Projection cap vector contains NaN or Inf values")
         norm = float(self.vector.norm().item())
         if norm == 0.0:
-            raise ValueError("Projection cap vector has zero norm (cannot be normalized)")
+            raise ValueError(
+                "Projection cap vector has zero norm (cannot be normalized)"
+            )
 
     def clone(self) -> "ProjectionCapSpec":
         return ProjectionCapSpec(
@@ -200,8 +205,12 @@ class LayerSteeringSpec:
         add_active = False
         if self.add is not None:
             scale = float(self.add.scale)
-            add_active = math.isfinite(scale) and not math.isclose(scale, 0.0, rel_tol=0.0, abs_tol=1e-12)
-        return (not add_active) and self.projection_cap is None and self.ablation is None
+            add_active = math.isfinite(scale) and not math.isclose(
+                scale, 0.0, rel_tol=0.0, abs_tol=1e-12
+            )
+        return (
+            (not add_active) and self.projection_cap is None and self.ablation is None
+        )
 
 
 @dataclass
@@ -298,7 +307,7 @@ def _cleanup_capture_handle_and_warn(
             f"but was never accessed! This wastes memory. "
             f"Use 'async with handle:' or call 'await handle.close()' explicitly.",
             ResourceWarning,
-            stacklevel=2
+            stacklevel=2,
         )
 
     # Attempt cleanup (may fail if model is gone)
@@ -307,7 +316,9 @@ def _cleanup_capture_handle_and_warn(
         try:
             # We're in a finalizer, can't use async/await
             # The shared memory will be cleaned up by worker-side TTL
-            logger.debug(f"Finalizer: {len(shm_names)} shm segments will be cleaned by TTL")
+            logger.debug(
+                f"Finalizer: {len(shm_names)} shm segments will be cleaned by TTL"
+            )
         except Exception as e:
             logger.debug(f"Finalizer cleanup note: {e}")
 
@@ -422,8 +433,7 @@ class CaptureHandle:
             if model is None:
                 raise RuntimeError("Model has been garbage collected")
             self._captures = await model._fetch_request_captures(
-                self.request_id,
-                shm_objects_list=self._shm_objects
+                self.request_id, shm_objects_list=self._shm_objects
             )
             # Extract names for cleanup RPC
             self._shm_names = [shm.name for shm in self._shm_objects]
@@ -573,7 +583,7 @@ def compute_message_boundaries(
     current_offset = 0
 
     for i, msg in enumerate(messages):
-        partial_conv = messages[:i + 1]
+        partial_conv = messages[: i + 1]
 
         partial_text = tokenizer.apply_chat_template(
             partial_conv,
@@ -634,24 +644,30 @@ class VLLMSteerModel:
 
         # Shared memory configuration (default from env vars if not specified)
         import os
+
         self._use_shared_memory = (
-            use_shared_memory if use_shared_memory is not None
+            use_shared_memory
+            if use_shared_memory is not None
             else bool(int(os.getenv("CHATSPACE_SHARED_MEMORY", "0")))
         )
         self._shm_threshold_kb = (
-            shm_threshold_kb if shm_threshold_kb is not None
+            shm_threshold_kb
+            if shm_threshold_kb is not None
             else int(os.getenv("CHATSPACE_SHM_THRESHOLD_KB", "1024"))
         )
         self._shm_ttl_seconds = (
-            shm_ttl_seconds if shm_ttl_seconds is not None
+            shm_ttl_seconds
+            if shm_ttl_seconds is not None
             else int(os.getenv("CHATSPACE_SHM_TTL", "600"))
         )
         self._shm_max_gb = (
-            shm_max_gb if shm_max_gb is not None
+            shm_max_gb
+            if shm_max_gb is not None
             else float(os.getenv("CHATSPACE_MAX_SHM_GB", "128"))
         )
         self._decode_buffer_size = (
-            decode_buffer_size if decode_buffer_size is not None
+            decode_buffer_size
+            if decode_buffer_size is not None
             else int(os.getenv("CHATSPACE_DECODE_BUFFER_SIZE", "128"))
         )
 
@@ -683,10 +699,7 @@ class VLLMSteerModel:
         from vllm import AsyncEngineArgs
         import asyncio
 
-        engine_args = AsyncEngineArgs(
-            model=cfg.model_name,
-            **llm_kwargs
-        )
+        engine_args = AsyncEngineArgs(model=cfg.model_name, **llm_kwargs)
 
         # Create engine (this needs to run in async context, so we'll defer)
         self._engine_args = engine_args
@@ -707,7 +720,10 @@ class VLLMSteerModel:
 
         # Load model config to get dimensions before engine init
         from transformers import AutoConfig
-        model_config = AutoConfig.from_pretrained(cfg.model_name, trust_remote_code=True)
+
+        model_config = AutoConfig.from_pretrained(
+            cfg.model_name, trust_remote_code=True
+        )
         self.hidden_size: int = model_config.hidden_size
         self.layer_count: int = model_config.num_hidden_layers
         self._vector_dtype: torch.dtype | None = None
@@ -721,6 +737,7 @@ class VLLMSteerModel:
         """Lazy-load tokenizer for prompt length tracking."""
         if self._tokenizer is None:
             from transformers import AutoTokenizer
+
             self._tokenizer = AutoTokenizer.from_pretrained(self.cfg.model_name)
         return self._tokenizer
 
@@ -748,7 +765,9 @@ class VLLMSteerModel:
 
             # Create async engine
             self._engine = AsyncLLMEngine.from_engine_args(self._engine_args)
-            self._engine_client = self._engine  # AsyncLLMEngine has collective_rpc directly
+            self._engine_client = (
+                self._engine
+            )  # AsyncLLMEngine has collective_rpc directly
 
             # Initialize worker state with shared memory and capture config
             setup_info = await self._collective_rpc(
@@ -809,7 +828,9 @@ class VLLMSteerModel:
         await self._collective_rpc("unregister_steering_spec", request_id)
 
     @staticmethod
-    def simple_steering(layer: int, vector: torch.Tensor, scale: float = 1.0) -> SteeringSpec:
+    def simple_steering(
+        layer: int, vector: torch.Tensor, scale: float = 1.0
+    ) -> SteeringSpec:
         """Create a simple additive steering spec for a single layer.
 
         Parameters
@@ -836,12 +857,17 @@ class VLLMSteerModel:
         norm = float(vector.norm().item())
         unit = vector / norm if norm > 0 else vector
         return SteeringSpec(
-            layers={layer: LayerSteeringSpec(add=AddSpec(vector=unit, scale=norm * scale))}
+            layers={
+                layer: LayerSteeringSpec(add=AddSpec(vector=unit, scale=norm * scale))
+            }
         )
 
     @staticmethod
     def simple_projection_cap(
-        layer: int, vector: torch.Tensor, min: float | None = None, max: float | None = None
+        layer: int,
+        vector: torch.Tensor,
+        min: float | None = None,
+        max: float | None = None,
     ) -> SteeringSpec:
         """Create a projection cap steering spec for a single layer.
 
@@ -876,12 +902,16 @@ class VLLMSteerModel:
         unit = vector / norm
         return SteeringSpec(
             layers={
-                layer: LayerSteeringSpec(projection_cap=ProjectionCapSpec(vector=unit, min=min, max=max))
+                layer: LayerSteeringSpec(
+                    projection_cap=ProjectionCapSpec(vector=unit, min=min, max=max)
+                )
             }
         )
 
     @staticmethod
-    def simple_ablation(layer: int, vector: torch.Tensor, scale: float = 1.0) -> SteeringSpec:
+    def simple_ablation(
+        layer: int, vector: torch.Tensor, scale: float = 1.0
+    ) -> SteeringSpec:
         """Create an ablation steering spec for a single layer.
 
         Removes the component of hidden states along a direction vector.
@@ -910,7 +940,11 @@ class VLLMSteerModel:
             raise ValueError("Ablation vector must have nonzero norm")
         unit = vector / norm
         return SteeringSpec(
-            layers={layer: LayerSteeringSpec(ablation=AblationSpec(vector=unit, scale=scale))}
+            layers={
+                layer: LayerSteeringSpec(
+                    ablation=AblationSpec(vector=unit, scale=scale)
+                )
+            }
         )
 
     def _serialize_steering_spec(self, spec: SteeringSpec) -> dict[str, Any]:
@@ -985,8 +1019,15 @@ class VLLMSteerModel:
         capture_layers: int | Sequence[int] | None = None,
         steering_spec: SteeringSpec | None = None,
         raw_output: bool = False,
+        stream: bool = False,
         **kwargs: Any,
-    ) -> list[str] | tuple[list[str], list[CaptureHandle]] | list[Any] | tuple[list[Any], list[CaptureHandle]]:
+    ) -> (
+        list[str]
+        | tuple[list[str], list[CaptureHandle]]
+        | list[Any]
+        | tuple[list[Any], list[CaptureHandle]]
+        | Any
+    ):
         """Generate text with optional activation capture and per-request steering.
 
         Parameters
@@ -1003,19 +1044,82 @@ class VLLMSteerModel:
             vectors, projection caps, and ablations to the specified layers.
         raw_output : bool
             If True, return full RequestOutput objects instead of text strings.
+        stream : bool
+            If True, return an async generator that yields incremental text updates.
+            When streaming, capture_layers and multiple prompts are not supported.
         **kwargs : Any
             Additional sampling parameters (used if sampling_params is None).
 
         Returns
         -------
-        list[str] if capture_layers is None and raw_output is False
-        tuple[list[str], list[CaptureHandle]] if capture_layers is not None and raw_output is False
-        list[RequestOutput] if capture_layers is None and raw_output is True
-        tuple[list[RequestOutput], list[CaptureHandle]] if capture_layers is not None and raw_output is True
+        list[str] if capture_layers is None and raw_output is False and stream is False
+        tuple[list[str], list[CaptureHandle]] if capture_layers is not None and
+            raw_output is False and stream is False
+        list[RequestOutput] if capture_layers is None and raw_output is True and
+            stream is False
+        tuple[list[RequestOutput], list[CaptureHandle]] if capture_layers is not None
+            and raw_output is True and stream is False
+        AsyncGenerator[str, None] if stream is True and raw_output is False
+        AsyncGenerator[RequestOutput, None] if stream is True and raw_output is True
         """
         import uuid
+
         await self._ensure_engine_initialized()
 
+        # Streaming mode: return async generator
+        if stream:
+            if capture_layers is not None:
+                raise ValueError("capture_layers is not supported with stream=True")
+            if isinstance(prompts, list) and len(prompts) > 1:
+                raise ValueError(
+                    "Multiple prompts are not supported with stream=True. "
+                    "Use a single prompt string."
+                )
+
+            # Normalize to single prompt
+            single_prompt = prompts if isinstance(prompts, str) else prompts[0]
+            if sampling_params is None:
+                sampling_params = SamplingParams(**kwargs)
+
+            # Return async generator
+            async def _stream_generator():
+                # Generate request ID
+                request_id = f"stream_{uuid.uuid4().hex}"
+
+                # Register steering spec if provided
+                if steering_spec is not None:
+                    await self._register_steering_spec(request_id, steering_spec)
+
+                try:
+                    # Stream incremental updates
+                    last_text = ""
+                    async for output in self._engine.generate(
+                        single_prompt, sampling_params, request_id=request_id
+                    ):
+                        if raw_output:
+                            yield output
+                        else:
+                            current_text = output.outputs[0].text
+                            # Yield only the new text (delta)
+                            delta = current_text[len(last_text) :]
+                            if delta:
+                                yield delta
+                            last_text = current_text
+                finally:
+                    # Clean up steering spec
+                    if steering_spec is not None:
+                        try:
+                            await asyncio.wait_for(
+                                self._unregister_steering_spec(request_id), timeout=5.0
+                            )
+                        except asyncio.TimeoutError:
+                            logger.warning(
+                                f"Steering cleanup timed out for streaming request {request_id}"
+                            )
+
+            return _stream_generator()
+
+        # Non-streaming mode: existing behavior
         # Note: No longer using read lock since steering is per-request
         if isinstance(prompts, str):
             prompts = [prompts]
@@ -1034,7 +1138,9 @@ class VLLMSteerModel:
             # Validate layer indices
             for layer_idx in layers_tuple:
                 if layer_idx < 0:
-                    raise ValueError(f"Capture layer index must be non-negative, got {layer_idx}")
+                    raise ValueError(
+                        f"Capture layer index must be non-negative, got {layer_idx}"
+                    )
                 if layer_idx >= self.layer_count:
                     raise ValueError(
                         f"Capture layer index {layer_idx} is out of range. "
@@ -1045,7 +1151,9 @@ class VLLMSteerModel:
             handles = []
             for i, prompt in enumerate(prompts):
                 req_id = f"capture_{uuid.uuid4().hex}"
-                await self._collective_rpc("register_capture_request", req_id, list(layers_tuple))
+                await self._collective_rpc(
+                    "register_capture_request", req_id, list(layers_tuple)
+                )
                 handle = CaptureHandle(
                     request_id=req_id,
                     layer_indices=layers_tuple,
@@ -1069,7 +1177,9 @@ class VLLMSteerModel:
             async def process_one_request(i: int, prompt: str) -> Any:
                 request_id = request_ids[i]
                 final_output = None
-                async for output in self._engine.generate(prompt, sampling_params, request_id=request_id):
+                async for output in self._engine.generate(
+                    prompt, sampling_params, request_id=request_id
+                ):
                     final_output = output
 
                 if final_output is None:
@@ -1099,17 +1209,23 @@ class VLLMSteerModel:
                     # Run all cleanups in parallel with a single timeout for the entire batch
                     results = await asyncio.wait_for(
                         asyncio.gather(*cleanup_tasks, return_exceptions=True),
-                        timeout=5.0
+                        timeout=5.0,
                     )
                     # Check for failures
                     failures = []
                     for req_id, result in zip(request_ids, results):
                         if isinstance(result, Exception):
-                            failures.append(f"{req_id} ({type(result).__name__}: {result})")
+                            failures.append(
+                                f"{req_id} ({type(result).__name__}: {result})"
+                            )
                     if failures:
-                        logger.warning(f"Steering cleanup failed for {len(failures)} requests: {failures[:5]}")
+                        logger.warning(
+                            f"Steering cleanup failed for {len(failures)} requests: {failures[:5]}"
+                        )
                 except asyncio.TimeoutError:
-                    logger.warning(f"Steering cleanup timed out for batch of {len(request_ids)} requests")
+                    logger.warning(
+                        f"Steering cleanup timed out for batch of {len(request_ids)} requests"
+                    )
 
     @overload
     async def chat(
@@ -1121,6 +1237,7 @@ class VLLMSteerModel:
         chat_options: dict[str, Any] | None = None,
         capture_layers: None = None,
         raw_output: Literal[False] = False,
+        stream: Literal[False] = False,
         **sampling_kwargs: Any,
     ) -> list[ChatResponse]: ...
 
@@ -1134,6 +1251,7 @@ class VLLMSteerModel:
         chat_options: dict[str, Any] | None = None,
         capture_layers: None = None,
         raw_output: Literal[True] = True,
+        stream: Literal[False] = False,
         **sampling_kwargs: Any,
     ) -> list[Any]: ...
 
@@ -1147,6 +1265,7 @@ class VLLMSteerModel:
         chat_options: dict[str, Any] | None = None,
         capture_layers: int | Sequence[int],
         raw_output: Literal[False] = False,
+        stream: Literal[False] = False,
         **sampling_kwargs: Any,
     ) -> tuple[list[ChatResponse], list[CaptureHandle]]: ...
 
@@ -1160,8 +1279,23 @@ class VLLMSteerModel:
         chat_options: dict[str, Any] | None = None,
         capture_layers: int | Sequence[int],
         raw_output: Literal[True] = True,
+        stream: Literal[False] = False,
         **sampling_kwargs: Any,
     ) -> tuple[list[Any], list[CaptureHandle]]: ...
+
+    @overload
+    async def chat(
+        self,
+        messages: list[dict[str, Any]] | list[list[dict[str, Any]]],
+        sampling_params: SamplingParams | None = None,
+        *,
+        use_tqdm: bool = False,
+        chat_options: dict[str, Any] | None = None,
+        capture_layers: None = None,
+        raw_output: Literal[False] = False,
+        stream: Literal[True] = True,
+        **sampling_kwargs: Any,
+    ) -> Any: ...
 
     async def chat(
         self,
@@ -1172,8 +1306,15 @@ class VLLMSteerModel:
         chat_options: dict[str, Any] | None = None,
         capture_layers: int | Sequence[int] | None = None,
         raw_output: bool = False,
+        stream: bool = False,
         **sampling_kwargs: Any,
-    ) -> list[ChatResponse] | list[Any] | tuple[list[ChatResponse], list[CaptureHandle]] | tuple[list[Any], list[CaptureHandle]]:
+    ) -> (
+        list[ChatResponse]
+        | list[Any]
+        | tuple[list[ChatResponse], list[CaptureHandle]]
+        | tuple[list[Any], list[CaptureHandle]]
+        | Any
+    ):
         """Execute chat-style generation with optional sampling overrides and activation capture.
 
         Parameters
@@ -1196,16 +1337,25 @@ class VLLMSteerModel:
         raw_output : bool
             If True, return full RequestOutput objects with token IDs and logprobs.
             If False (default), return ChatResponse objects with prefill/generated separation.
+        stream : bool
+            If True, return an async generator that yields incremental text updates.
+            When streaming, capture_layers and multiple conversations are not supported.
         **sampling_kwargs : Any
             Keyword arguments used to build a ``SamplingParams`` instance when
             ``sampling_params`` is not supplied.
 
         Returns
         -------
-        list[ChatResponse] if capture_layers is None and raw_output is False
-        tuple[list[ChatResponse], list[CaptureHandle]] if capture_layers is not None and raw_output is False
-        list[RequestOutput] if capture_layers is None and raw_output is True
-        tuple[list[RequestOutput], list[CaptureHandle]] if capture_layers is not None and raw_output is True
+        list[ChatResponse] if capture_layers is None and raw_output is False and
+            stream is False
+        tuple[list[ChatResponse], list[CaptureHandle]] if capture_layers is not None
+            and raw_output is False and stream is False
+        list[RequestOutput] if capture_layers is None and raw_output is True and
+            stream is False
+        tuple[list[RequestOutput], list[CaptureHandle]] if capture_layers is not None
+            and raw_output is True and stream is False
+        AsyncGenerator[str, None] if stream is True and raw_output is False
+        AsyncGenerator[RequestOutput, None] if stream is True and raw_output is True
         """
         if sampling_params is None:
             sampling_params = SamplingParams(**sampling_kwargs)
@@ -1229,6 +1379,56 @@ class VLLMSteerModel:
 
         await self._ensure_engine_initialized()
 
+        # Streaming mode: return async generator
+        if stream:
+            if capture_layers is not None:
+                raise ValueError("capture_layers is not supported with stream=True")
+            if not single_conversation:
+                raise ValueError(
+                    "Multiple conversations are not supported with stream=True. "
+                    "Use a single conversation."
+                )
+
+            if sampling_params is None:
+                sampling_params = SamplingParams(**sampling_kwargs)
+
+            # Return async generator
+            async def _stream_chat_generator():
+                import uuid
+
+                prompt = self.tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    **chat_kwargs,
+                )
+
+                request_id = f"chat_stream_{uuid.uuid4().hex}"
+
+                try:
+                    # Stream incremental updates
+                    last_text = ""
+                    async for output in self._engine.generate(
+                        prompt,
+                        sampling_params=sampling_params,
+                        request_id=request_id,
+                    ):
+                        if raw_output:
+                            yield output
+                        else:
+                            current_text = output.outputs[0].text
+                            # Yield only the new text (delta)
+                            delta = current_text[len(last_text) :]
+                            if delta:
+                                yield delta
+                            last_text = current_text
+                finally:
+                    # Note: steering cleanup not needed here since chat()
+                    # doesn't support steering_spec
+                    pass
+
+            return _stream_chat_generator()
+
+        # Non-streaming mode: existing behavior
         # Setup capture if requested
         handles: list[CaptureHandle] | None = None
         if capture_layers is not None:
@@ -1242,8 +1442,11 @@ class VLLMSteerModel:
             handles = []
             for i in range(len(batched_messages)):
                 import uuid
+
                 req_id = f"chat_capture_{uuid.uuid4().hex}"
-                await self._collective_rpc("register_capture_request", req_id, list(layers_tuple))
+                await self._collective_rpc(
+                    "register_capture_request", req_id, list(layers_tuple)
+                )
 
                 message_boundaries = compute_message_boundaries(
                     batched_messages[i],
@@ -1262,7 +1465,9 @@ class VLLMSteerModel:
         import uuid
 
         # Process all conversations concurrently for maximum throughput
-        async def process_one_conversation(i: int, messages_conv: list[dict[str, Any]]) -> ChatResponse | Any:
+        async def process_one_conversation(
+            i: int, messages_conv: list[dict[str, Any]]
+        ) -> ChatResponse | Any:
             has_prefill = False
             prefill_text = ""
             if (
@@ -1303,14 +1508,15 @@ class VLLMSteerModel:
                 return response
 
         # Launch all conversations concurrently
-        tasks = [process_one_conversation(i, conv) for i, conv in enumerate(batched_messages)]
+        tasks = [
+            process_one_conversation(i, conv) for i, conv in enumerate(batched_messages)
+        ]
         results: list[ChatResponse] | list[Any] = await asyncio.gather(*tasks)
 
         if handles:
             return results, handles
         else:
             return results
-
 
     # ------------------------------------------------------------------
     # Sync wrappers for backward compatibility (deprecated)
@@ -1359,9 +1565,7 @@ class VLLMSteerModel:
     # ------------------------------------------------------------------
 
     async def _fetch_request_captures(
-        self,
-        request_id: str,
-        shm_objects_list: list[SharedMemory] | None = None
+        self, request_id: str, shm_objects_list: list[SharedMemory] | None = None
     ) -> dict[int, list[dict[str, Any]]]:
         """Fetch and deserialize captures for a single request.
 
@@ -1380,7 +1584,7 @@ class VLLMSteerModel:
                     tensor_data,
                     device=torch.device("cpu"),
                     dtype=self._vector_dtype,
-                    shm_objects_list=shm_objects_list
+                    shm_objects_list=shm_objects_list,
                 )
                 if layer_idx not in decoded:
                     decoded[layer_idx] = []
@@ -1388,10 +1592,7 @@ class VLLMSteerModel:
 
         return decoded
 
-    async def fetch_captures_batch(
-        self,
-        handles: Sequence[CaptureHandle]
-    ) -> None:
+    async def fetch_captures_batch(self, handles: Sequence[CaptureHandle]) -> None:
         """Fetch captures for multiple handles in a single RPC call.
 
         Args:
@@ -1419,7 +1620,9 @@ class VLLMSteerModel:
         results_by_request: dict[str, dict[int, list[dict[str, Any]]]] = {}
 
         # Track SharedMemory objects per handle to keep them alive
-        shm_tracking: dict[str, list[SharedMemory]] = {}  # request_id -> list of SharedMemory objects
+        shm_tracking: dict[str, list[SharedMemory]] = (
+            {}
+        )  # request_id -> list of SharedMemory objects
 
         for worker_batch in batch_payloads:
             for request_id, layer_data in worker_batch.items():
@@ -1444,14 +1647,21 @@ class VLLMSteerModel:
                             # Handle bfloat16 specially
                             if dtype_str == "bfloat16":
                                 import ml_dtypes
+
                                 # Create numpy array view as bfloat16
-                                np_array = np.ndarray(shape, dtype=ml_dtypes.bfloat16, buffer=shm.buf)
+                                np_array = np.ndarray(
+                                    shape, dtype=ml_dtypes.bfloat16, buffer=shm.buf
+                                )
                                 # Convert to torch: view as uint16, then reinterpret as bfloat16
-                                tensor = torch.from_numpy(np_array.view(np.uint16)).view(torch.bfloat16)
+                                tensor = torch.from_numpy(
+                                    np_array.view(np.uint16)
+                                ).view(torch.bfloat16)
                             else:
                                 # Standard dtypes
                                 np_dtype = getattr(np, dtype_str.replace("torch.", ""))
-                                np_array = np.ndarray(shape, dtype=np_dtype, buffer=shm.buf)
+                                np_array = np.ndarray(
+                                    shape, dtype=np_dtype, buffer=shm.buf
+                                )
                                 tensor = torch.from_numpy(np_array)
 
                             # Convert to desired dtype
@@ -1460,14 +1670,16 @@ class VLLMSteerModel:
                             # Track SharedMemory object to keep it alive
                             shm_tracking[request_id].append(shm)
                         except Exception as e:
-                            logger.error(f"Failed to open shared memory {shm_name}: {e}")
+                            logger.error(
+                                f"Failed to open shared memory {shm_name}: {e}"
+                            )
                             raise
                     else:
                         # Bytes encoding: use existing deserialization
                         tensor = steering_runtime.deserialize_tensor(
                             tensor_data,
                             device=torch.device("cpu"),
-                            dtype=self._vector_dtype
+                            dtype=self._vector_dtype,
                         )
 
                     if layer_idx not in results_by_request[request_id]:
