@@ -176,41 +176,53 @@ class AblationSpec:
         return AblationSpec(vector=self.vector.detach().clone(), scale=self.scale)
 
 
+# Union type for steering operations
+SteeringOp = AddSpec | ProjectionCapSpec | AblationSpec
+
+
 @dataclass
 class LayerSteeringSpec:
     """All steering controls for a single transformer layer.
 
+    Operations are applied in sequence order. Supports multiple caps/ablations
+    and arbitrary interleaving of operation types.
+
     Parameters
     ----------
-    add :
-        Optional :class:`AddSpec` describing the additive steering vector.
-    projection_cap :
-        Optional :class:`ProjectionCapSpec` applied after the steering addition.
-    ablation :
-        Optional :class:`AblationSpec` applied after the steering addition.
+    operations :
+        Ordered list of steering operations to apply.
+
+    Example
+    -------
+    >>> LayerSteeringSpec(operations=[
+    ...     AddSpec(vector=v1, scale=1.0),
+    ...     ProjectionCapSpec(vector=v2, min=-1.0, max=1.0),
+    ...     AblationSpec(vector=v3, scale=0.5),
+    ... ])
     """
 
-    add: AddSpec | None = None
-    projection_cap: ProjectionCapSpec | None = None
-    ablation: AblationSpec | None = None
+    operations: list[SteeringOp] = field(default_factory=list)
 
     def clone(self) -> "LayerSteeringSpec":
         return LayerSteeringSpec(
-            add=self.add.clone() if self.add else None,
-            projection_cap=self.projection_cap.clone() if self.projection_cap else None,
-            ablation=self.ablation.clone() if self.ablation else None,
+            operations=[op.clone() for op in self.operations],
         )
 
     def is_empty(self) -> bool:
-        add_active = False
-        if self.add is not None:
-            scale = float(self.add.scale)
-            add_active = math.isfinite(scale) and not math.isclose(
-                scale, 0.0, rel_tol=0.0, abs_tol=1e-12
-            )
-        return (
-            (not add_active) and self.projection_cap is None and self.ablation is None
-        )
+        if not self.operations:
+            return True
+        # Check if any AddSpec has non-zero scale
+        for op in self.operations:
+            if isinstance(op, AddSpec):
+                scale = float(op.scale)
+                if math.isfinite(scale) and not math.isclose(
+                    scale, 0.0, rel_tol=0.0, abs_tol=1e-12
+                ):
+                    return False
+            else:
+                # ProjectionCapSpec and AblationSpec are always considered active
+                return False
+        return True
 
 
 @dataclass
@@ -845,7 +857,9 @@ class VLLMSteerModel:
         unit = vector / norm if norm > 0 else vector
         return SteeringSpec(
             layers={
-                layer: LayerSteeringSpec(add=AddSpec(vector=unit, scale=norm * scale))
+                layer: LayerSteeringSpec(
+                    operations=[AddSpec(vector=unit, scale=norm * scale)]
+                )
             }
         )
 
@@ -890,7 +904,7 @@ class VLLMSteerModel:
         return SteeringSpec(
             layers={
                 layer: LayerSteeringSpec(
-                    projection_cap=ProjectionCapSpec(vector=unit, min=min, max=max)
+                    operations=[ProjectionCapSpec(vector=unit, min=min, max=max)]
                 )
             }
         )
@@ -929,7 +943,7 @@ class VLLMSteerModel:
         return SteeringSpec(
             layers={
                 layer: LayerSteeringSpec(
-                    ablation=AblationSpec(vector=unit, scale=scale)
+                    operations=[AblationSpec(vector=unit, scale=scale)]
                 )
             }
         )
@@ -946,55 +960,62 @@ class VLLMSteerModel:
 
         serialized_layers = {}
         for layer_idx, layer_spec in spec.layers.items():
-            serialized_layer = {}
+            serialized_ops = []
 
-            if layer_spec.add is not None:
-                # Validate dimension
-                vector = layer_spec.add.materialize()
-                if vector.numel() != self.hidden_size:
-                    raise ValueError(
-                        f"Steering vector dimension mismatch at layer {layer_idx}: "
-                        f"expected {self.hidden_size}, got {vector.numel()}. "
-                        f"Vector shape: {vector.shape}"
+            for op in layer_spec.operations:
+                if isinstance(op, AddSpec):
+                    vector = op.materialize()
+                    if vector.numel() != self.hidden_size:
+                        raise ValueError(
+                            f"Steering vector dimension mismatch at layer {layer_idx}: "
+                            f"expected {self.hidden_size}, got {vector.numel()}. "
+                            f"Vector shape: {vector.shape}"
+                        )
+                    serialized_ops.append(
+                        {
+                            "type": "add",
+                            "vector": steering_runtime.serialize_tensor(
+                                vector.to(dtype=self._vector_dtype)
+                            ),
+                        }
                     )
-                serialized_layer["add"] = {
-                    "vector": steering_runtime.serialize_tensor(
-                        vector.to(dtype=self._vector_dtype)
-                    ),
-                }
 
-            if layer_spec.projection_cap is not None:
-                # Validate dimension
-                if layer_spec.projection_cap.vector.numel() != self.hidden_size:
-                    raise ValueError(
-                        f"Projection cap vector dimension mismatch at layer {layer_idx}: "
-                        f"expected {self.hidden_size}, got {layer_spec.projection_cap.vector.numel()}. "
-                        f"Vector shape: {layer_spec.projection_cap.vector.shape}"
+                elif isinstance(op, ProjectionCapSpec):
+                    if op.vector.numel() != self.hidden_size:
+                        raise ValueError(
+                            f"Projection cap vector dimension mismatch at layer {layer_idx}: "
+                            f"expected {self.hidden_size}, got {op.vector.numel()}. "
+                            f"Vector shape: {op.vector.shape}"
+                        )
+                    serialized_ops.append(
+                        {
+                            "type": "cap",
+                            "vector": steering_runtime.serialize_tensor(
+                                op.vector.to(dtype=torch.float32)
+                            ),
+                            "min": op.min,
+                            "max": op.max,
+                        }
                     )
-                serialized_layer["projection_cap"] = {
-                    "vector": steering_runtime.serialize_tensor(
-                        layer_spec.projection_cap.vector.to(dtype=torch.float32)
-                    ),
-                    "min": layer_spec.projection_cap.min,
-                    "max": layer_spec.projection_cap.max,
-                }
 
-            if layer_spec.ablation is not None:
-                # Validate dimension
-                if layer_spec.ablation.vector.numel() != self.hidden_size:
-                    raise ValueError(
-                        f"Ablation vector dimension mismatch at layer {layer_idx}: "
-                        f"expected {self.hidden_size}, got {layer_spec.ablation.vector.numel()}. "
-                        f"Vector shape: {layer_spec.ablation.vector.shape}"
+                elif isinstance(op, AblationSpec):
+                    if op.vector.numel() != self.hidden_size:
+                        raise ValueError(
+                            f"Ablation vector dimension mismatch at layer {layer_idx}: "
+                            f"expected {self.hidden_size}, got {op.vector.numel()}. "
+                            f"Vector shape: {op.vector.shape}"
+                        )
+                    serialized_ops.append(
+                        {
+                            "type": "ablation",
+                            "vector": steering_runtime.serialize_tensor(
+                                op.vector.to(dtype=torch.float32)
+                            ),
+                            "scale": float(op.scale),
+                        }
                     )
-                serialized_layer["ablation"] = {
-                    "vector": steering_runtime.serialize_tensor(
-                        layer_spec.ablation.vector.to(dtype=torch.float32)
-                    ),
-                    "scale": float(layer_spec.ablation.scale),
-                }
 
-            serialized_layers[int(layer_idx)] = serialized_layer
+            serialized_layers[int(layer_idx)] = {"operations": serialized_ops}
 
         return {"layers": serialized_layers}
 
